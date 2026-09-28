@@ -101,6 +101,6 @@ struct OrbitCamera: Equatable {
 
     mutating func frame(center: SIMD3<Float>, radius: Float) {
         target = center
-        distance = radius * 1.6
+        distance = radius / sin(fovY / 2) * 1.1
     }
 }

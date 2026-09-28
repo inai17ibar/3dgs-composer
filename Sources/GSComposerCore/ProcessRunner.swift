@@ -73,6 +73,9 @@ public final class ProcessRunner: @unchecked Sendable {
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
                     if process.isRunning { process.terminate() }
                 }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 6) {
+                    if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                }
             }
         }
         try Task.checkCancellation()
