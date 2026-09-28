@@ -1,0 +1,55 @@
+name: GSComposer
+options:
+  bundleIdPrefix: com.inai17ibar
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+targets:
+  GSComposerCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Sources/GSComposerCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.inai17ibar.GSComposerCore
+        GENERATE_INFOPLIST_FILE: true
+  GSComposer:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/GSComposer
+    dependencies:
+      - target: GSComposerCore
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleName: 3DGS Composer
+        CFBundleDisplayName: 3DGS Composer
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "15.0"
+        NSHighResolutionCapable: true
+        LSApplicationCategoryType: public.app-category.graphics-design
+    entitlements:
+      path: Support/GSComposer.entitlements
+      properties:
+        # COLMAP / Brush / OpenSplat を子プロセスとして起動するためサンドボックスは無効
+        com.apple.security.app-sandbox: false
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.inai17ibar.GSComposer
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_HARDENED_RUNTIME: true
+  GSComposerCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/GSComposerCoreTests
+    dependencies:
+      - target: GSComposerCore
