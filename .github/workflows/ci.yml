@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux-core:
+    name: Core tests (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - run: swift build
+      - run: swift test
+
+  macos-app:
+    name: App build (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app || true
+      - run: swift build
+      - run: swift test
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Build app
+        run: |
+          xcodebuild -project GSComposer.xcodeproj -scheme GSComposer -configuration Release \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GSComposer-app
+          path: build/Build/Products/Release/GSComposer.app
