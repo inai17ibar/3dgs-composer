@@ -6,7 +6,9 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var model = model
-        ScrollView {
+        // NavigationSplitView のサイドバー列に ScrollView を置くと、中のボタンにクリックが届かない
+        // (hitTest が PlatformGroupContainer で止まる)。List なら正しくルーティングされる。
+        List {
             VStack(alignment: .leading, spacing: 16) {
                 inputSection
                 Divider()
@@ -15,8 +17,9 @@ struct SidebarView: View {
                 runSection
                 StageListView()
             }
-            .padding()
+            .padding(.vertical, 8)
         }
+        .listStyle(.sidebar)
     }
 
     private var inputSection: some View {
