@@ -72,10 +72,15 @@ public struct ColmapCapabilities: Equatable, Sendable {
     public var mapper: ColmapOptionSet
     public var globalMapper: ColmapOptionSet
     public var imageUndistorter: ColmapOptionSet
+    public var matchesImporter: ColmapOptionSet
+    public var pointTriangulator: ColmapOptionSet
+    public var bundleAdjuster: ColmapOptionSet
 
     public init(commands: Set<String>, featureExtractor: ColmapOptionSet, sequentialMatcher: ColmapOptionSet,
                 exhaustiveMatcher: ColmapOptionSet, mapper: ColmapOptionSet, globalMapper: ColmapOptionSet,
-                imageUndistorter: ColmapOptionSet) {
+                imageUndistorter: ColmapOptionSet, matchesImporter: ColmapOptionSet = ColmapOptionSet(names: []),
+                pointTriangulator: ColmapOptionSet = ColmapOptionSet(names: []),
+                bundleAdjuster: ColmapOptionSet = ColmapOptionSet(names: [])) {
         self.commands = commands
         self.featureExtractor = featureExtractor
         self.sequentialMatcher = sequentialMatcher
@@ -83,6 +88,9 @@ public struct ColmapCapabilities: Equatable, Sendable {
         self.mapper = mapper
         self.globalMapper = globalMapper
         self.imageUndistorter = imageUndistorter
+        self.matchesImporter = matchesImporter
+        self.pointTriangulator = pointTriangulator
+        self.bundleAdjuster = bundleAdjuster
     }
 
     public static func parseCommandList(_ helpText: String) -> Set<String> {
@@ -120,15 +128,22 @@ public struct ColmapCommandBuilder: Sendable {
 
     private var gpuFlag: String { settings.useGPUForSIFT ? "1" : "0" }
 
-    public func featureExtraction() -> ToolCommand {
+    /// - Parameter knownCamera: fixed pinhole intrinsics (ARKit) shared by all images; nil to let SfM estimate them.
+    public func featureExtraction(knownCamera: PinholeCamera? = nil) -> ToolCommand {
         let o = capabilities.featureExtractor
         var args = [
             "feature_extractor",
             "--database_path", workspace.database.path,
             "--image_path", workspace.images.path,
-            "--ImageReader.camera_model", settings.cameraModel.rawValue,
-            "--ImageReader.single_camera", settings.singleCamera ? "1" : "0",
         ]
+        if let k = knownCamera {
+            args += ["--ImageReader.camera_model", ColmapCameraModel.pinhole.rawValue,
+                     "--ImageReader.single_camera", "1",
+                     "--ImageReader.camera_params", k.colmapParams]
+        } else {
+            args += ["--ImageReader.camera_model", settings.cameraModel.rawValue,
+                     "--ImageReader.single_camera", settings.singleCamera ? "1" : "0"]
+        }
         args += o.argument(["FeatureExtraction.use_gpu", "SiftExtraction.use_gpu"], gpuFlag)
         args += o.argument(["FeatureExtraction.max_image_size", "SiftExtraction.max_image_size"], String(settings.maxImageSize))
         args += o.argument(["SiftExtraction.max_num_features", "FeatureExtraction.max_num_features"], String(settings.maxFeatures))
@@ -173,6 +188,56 @@ public struct ColmapCommandBuilder: Sendable {
             args += o.argument(["Mapper.multiple_models"], "1")
             return ToolCommand(executable: colmap, arguments: args)
         }
+    }
+
+    /// Matches only the listed image pairs (see `KnownPoseModel.pairs`).
+    public func pairMatching(listPath: URL) -> ToolCommand {
+        let o = capabilities.matchesImporter
+        var args = ["matches_importer", "--database_path", workspace.database.path,
+                    "--match_list_path", listPath.path, "--match_type", "pairs"]
+        args += o.argument(["FeatureMatching.use_gpu", "SiftMatching.use_gpu"], gpuFlag)
+        return ToolCommand(executable: colmap, arguments: args)
+    }
+
+    /// Triangulates 3D points for the fixed poses in `input` (text model) without moving the cameras.
+    public func pointTriangulation(input: URL, output: URL) -> ToolCommand {
+        let o = capabilities.pointTriangulator
+        var args = ["point_triangulator",
+                    "--database_path", workspace.database.path,
+                    "--image_path", workspace.images.path,
+                    "--input_path", input.path,
+                    "--output_path", output.path]
+        args += o.argument(["clear_points"], "1")
+        args += o.argument(["refine_intrinsics"], "0")
+        // ARKit intrinsics come from the factory calibration; keep them fixed.
+        args += o.argument(["Mapper.ba_refine_focal_length"], "0")
+        args += o.argument(["Mapper.ba_refine_principal_point"], "0")
+        args += o.argument(["Mapper.ba_refine_extra_params"], "0")
+        return ToolCommand(executable: colmap, arguments: args)
+    }
+
+    /// Jointly refines the ARKit poses (small drift) and the points, keeping intrinsics fixed.
+    public func bundleAdjustment(input: URL, output: URL) -> ToolCommand {
+        let o = capabilities.bundleAdjuster
+        var args = ["bundle_adjuster", "--input_path", input.path, "--output_path", output.path]
+        args += o.argument(["BundleAdjustment.refine_focal_length"], "0")
+        args += o.argument(["BundleAdjustment.refine_principal_point"], "0")
+        args += o.argument(["BundleAdjustment.refine_extra_params"], "0")
+        return ToolCommand(executable: colmap, arguments: args)
+    }
+
+    /// SfM worlds have an arbitrary orientation. Assuming the photos were taken upright, rotate the model
+    /// so gravity points along +Y (COLMAP's y-down convention) and the splats come out level.
+    /// `nil` when this COLMAP has no `model_orientation_aligner`.
+    public func orientationAlignment(model: URL) -> ToolCommand? {
+        guard capabilities.commands.contains("model_orientation_aligner") else { return nil }
+        return ToolCommand(executable: colmap, arguments: [
+            "model_orientation_aligner",
+            "--image_path", workspace.images.path,
+            "--input_path", model.path,
+            "--output_path", workspace.alignedModel.path,
+            "--method", "IMAGE-ORIENTATION",
+        ])
     }
 
     public func undistortion(model: URL) -> ToolCommand {

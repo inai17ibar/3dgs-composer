@@ -27,6 +27,7 @@ public enum PipelineError: Error, LocalizedError, Equatable {
     case notEnoughImages(Int)
     case reconstructionFailed
     case tooFewRegistered(registered: Int, total: Int)
+    case knownPosesFailed(String)
     case noTrainingOutput
 
     public var errorDescription: String? {
@@ -37,6 +38,8 @@ public enum PipelineError: Error, LocalizedError, Equatable {
             return "COLMAP がカメラ姿勢を推定できませんでした。重なりの多い写真・ブレの少ない動画を使うか、マッチング方式を変更してください。"
         case .tooFewRegistered(let r, let t):
             return "カメラ姿勢を推定できたのは \(t) 枚中 \(r) 枚のみでした。撮影し直すか、設定を見直してください。"
+        case .knownPosesFailed(let reason):
+            return "ARKit のカメラ姿勢を使った復元に失敗しました: \(reason)"
         case .noTrainingOutput:
             return "学習結果の PLY が見つかりませんでした。ログを確認してください。"
         }
@@ -50,13 +53,18 @@ public final class ReconstructionPipeline: @unchecked Sendable {
     public let tools: PipelineTools
     public let input: InputKind
     public let runner: ProcessRunner
+    /// Camera poses recorded on the phone (ARKit). When set, matching uses pose-based pairs and SfM is replaced
+    /// by triangulation with the poses fixed, which works even where COLMAP cannot register the frames itself.
+    public let knownPoses: KnownPoses?
 
-    public init(workspace: Workspace, settings: PipelineSettings, tools: PipelineTools, input: InputKind, runner: ProcessRunner) {
+    public init(workspace: Workspace, settings: PipelineSettings, tools: PipelineTools, input: InputKind, runner: ProcessRunner,
+                knownPoses: KnownPoses? = nil) {
         self.workspace = workspace
         self.settings = settings
         self.tools = tools
         self.input = input
         self.runner = runner
+        self.knownPoses = knownPoses
     }
 
     public func probeColmap() async -> ColmapCapabilities {
@@ -70,6 +78,9 @@ public final class ReconstructionPipeline: @unchecked Sendable {
         async let mp = help(["mapper", "-h"])
         async let gm = help(["global_mapper", "-h"])
         async let ud = help(["image_undistorter", "-h"])
+        async let mi = help(["matches_importer", "-h"])
+        async let pt = help(["point_triangulator", "-h"])
+        async let ba = help(["bundle_adjuster", "-h"])
         return await ColmapCapabilities(
             commands: ColmapCapabilities.parseCommandList(commands),
             featureExtractor: ColmapOptionSet(helpText: fe),
@@ -77,7 +88,10 @@ public final class ReconstructionPipeline: @unchecked Sendable {
             exhaustiveMatcher: ColmapOptionSet(helpText: em),
             mapper: ColmapOptionSet(helpText: mp),
             globalMapper: ColmapOptionSet(helpText: gm),
-            imageUndistorter: ColmapOptionSet(helpText: ud)
+            imageUndistorter: ColmapOptionSet(helpText: ud),
+            matchesImporter: ColmapOptionSet(helpText: mi),
+            pointTriangulator: ColmapOptionSet(helpText: pt),
+            bundleAdjuster: ColmapOptionSet(helpText: ba)
         )
     }
 
@@ -101,6 +115,15 @@ public final class ReconstructionPipeline: @unchecked Sendable {
         let stages = PipelineStage.allCases
         let startIndex = stages.firstIndex(of: max(start, .features)) ?? 1
         try workspace.reset(from: stages[startIndex] == .features ? .features : stages[startIndex])
+        // Poses survive in the workspace so later stages can be re-run (e.g. `--from mapping` in the CLI).
+        let known: KnownPoses?
+        if let knownPoses {
+            try JSONEncoder().encode(knownPoses).write(to: workspace.knownPosesFile, options: .atomic)
+            known = knownPoses
+        } else {
+            known = (try? Data(contentsOf: workspace.knownPosesFile)).flatMap { try? JSONDecoder().decode(KnownPoses.self, from: $0) }
+        }
+        if let known { emit(.log("ARKit のカメラ姿勢 \(known.poses.count) 枚分を使用します（SfM の代わりに三角測量）", .stdout)) }
 
         let imageCount = workspace.imageFiles().count
         if startIndex <= stages.firstIndex(of: .mapping)!, imageCount < 3 {
@@ -122,15 +145,27 @@ public final class ReconstructionPipeline: @unchecked Sendable {
             case .prepareImages:
                 summary = nil
             case .features:
-                try await runColmap(builder!.featureExtraction(), stage: stage, emit: emit)
+                try await runColmap(builder!.featureExtraction(knownCamera: known?.camera), stage: stage, emit: emit)
                 summary = "\(imageCount) 枚"
             case .matching:
-                try await runColmap(builder!.matching(), stage: stage, emit: emit)
-                summary = nil
+                if let known {
+                    let names = workspace.imageFiles().map(\.lastPathComponent)
+                    let pairs = KnownPoseModel.pairs(names: names, poses: known.poses)
+                    try KnownPoseModel.pairsText(pairs).write(to: workspace.pairsList, atomically: true, encoding: .utf8)
+                    try await runColmap(builder!.pairMatching(listPath: workspace.pairsList), stage: stage, emit: emit)
+                    summary = "カメラ姿勢から選んだ \(pairs.count) ペア"
+                } else {
+                    try await runColmap(builder!.matching(), stage: stage, emit: emit)
+                    summary = nil
+                }
             case .mapping:
-                summary = try await runMapping(builder!, imageCount: imageCount, emit: emit)
+                if let known {
+                    summary = try await runKnownPoseMapping(builder!, known: known, emit: emit)
+                } else {
+                    summary = try await runMapping(builder!, imageCount: imageCount, emit: emit)
+                }
             case .undistortion:
-                summary = try await runUndistortion(builder!, emit: emit)
+                summary = try await runUndistortion(builder!, gravityAligned: known != nil, emit: emit)
             case .training:
                 summary = try await runTraining(emit: emit)
             case .finalize:
@@ -173,13 +208,80 @@ public final class ReconstructionPipeline: @unchecked Sendable {
         return "\(imageCount) 枚中 \(model.registeredImageCount) 枚登録 / \(model.pointCount) 点"
     }
 
-    private func runUndistortion(_ builder: ColmapCommandBuilder, emit: @escaping @Sendable (PipelineEvent) -> Void) async throws -> String? {
+    /// Fixed ARKit poses → text model with the database's image IDs → `point_triangulator` → `bundle_adjuster`
+    /// (best effort; it only removes small tracking drift) → `sparse/0`.
+    private func runKnownPoseMapping(_ builder: ColmapCommandBuilder, known: KnownPoses,
+                                     emit: @escaping @Sendable (PipelineEvent) -> Void) async throws -> String {
+        let query = ToolCommand(executable: URL(fileURLWithPath: "/usr/bin/env"), arguments: [
+            "sqlite3", "-separator", "|", workspace.database.path,
+            "SELECT image_id, name, camera_id FROM images;",
+        ])
+        emit(.command(query.displayString))
+        let dbImages = KnownPoseModel.parseDatabaseImages(await runner.capture(query))
+        guard !dbImages.isEmpty else {
+            throw PipelineError.knownPosesFailed("COLMAP のデータベースから画像一覧を読めませんでした（sqlite3 が必要です）")
+        }
+        let posed = try KnownPoseModel.write(poses: known, databaseImages: dbImages, to: workspace.knownModel)
+        guard posed >= 3 else {
+            throw PipelineError.knownPosesFailed("姿勢のある画像が \(posed) 枚しかありません")
+        }
+        emit(.stageProgress(.mapping, fraction: nil, detail: "\(posed) 枚の姿勢を固定して三角測量"))
+        try FileManager.default.createDirectory(at: workspace.triangulatedModel, withIntermediateDirectories: true)
+        try await runColmap(builder.pointTriangulation(input: workspace.knownModel, output: workspace.triangulatedModel),
+                            stage: .mapping, emit: emit)
+
+        let target = workspace.sparse.appendingPathComponent("0", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        do {
+            emit(.stageProgress(.mapping, fraction: nil, detail: "バンドル調整で姿勢のずれを補正"))
+            try await runColmap(builder.bundleAdjustment(input: workspace.triangulatedModel, output: target), stage: .mapping, emit: emit)
+        } catch {
+            try Task.checkCancellation()
+            emit(.log("バンドル調整に失敗したため、ARKit の姿勢のまま続行します: \(error.localizedDescription)", .stderr))
+        }
+        if ColmapModelSummary.read(directory: target) == nil {
+            try? FileManager.default.removeItem(at: target)
+            try FileManager.default.copyItem(at: workspace.triangulatedModel, to: target)
+        }
+        guard let model = ColmapModelSummary.read(directory: target) else {
+            throw PipelineError.knownPosesFailed("三角測量の結果が見つかりません")
+        }
+        guard model.pointCount >= 100 else {
+            throw PipelineError.knownPosesFailed("3D 点が \(model.pointCount) 個しか作れませんでした。ブレや模様の少なさを確認してください")
+        }
+        return "ARKit の姿勢 \(posed) 枚 / \(model.pointCount) 点"
+    }
+
+    /// - Parameter gravityAligned: the model is already levelled (ARKit poses), so skip `model_orientation_aligner`.
+    private func runUndistortion(_ builder: ColmapCommandBuilder, gravityAligned: Bool,
+                                 emit: @escaping @Sendable (PipelineEvent) -> Void) async throws -> String? {
         guard let model = ColmapModelSummary.largestModel(in: workspace.sparse) else {
             throw PipelineError.reconstructionFailed
         }
-        try await runColmap(builder.undistortion(model: model.directory), stage: .undistortion, emit: emit)
+        let aligned = gravityAligned ? nil : try await alignOrientation(builder, model: model.directory, emit: emit)
+        let input = aligned ?? model.directory
+        try await runColmap(builder.undistortion(model: input), stage: .undistortion, emit: emit)
         try Self.normalizeDatasetLayout(workspace)
         return nil
+    }
+
+    /// Levels the model (see `ColmapCommandBuilder.orientationAlignment`). Best effort: on failure the
+    /// unaligned model is used, which still trains fine but may appear tilted in viewers.
+    private func alignOrientation(_ builder: ColmapCommandBuilder, model: URL,
+                                  emit: @escaping @Sendable (PipelineEvent) -> Void) async throws -> URL? {
+        guard let command = builder.orientationAlignment(model: model) else {
+            emit(.log("この COLMAP には model_orientation_aligner が無いため、向きの補正を省略します", .stderr))
+            return nil
+        }
+        do {
+            try FileManager.default.createDirectory(at: workspace.alignedModel, withIntermediateDirectories: true)
+            try await runColmap(command, stage: .undistortion, emit: emit)
+        } catch {
+            try Task.checkCancellation()
+            emit(.log("向きの補正に失敗したため、補正なしで続行します: \(error.localizedDescription)", .stderr))
+            return nil
+        }
+        return ColmapModelSummary.read(directory: workspace.alignedModel) != nil ? workspace.alignedModel : nil
     }
 
     /// `image_undistorter` writes `dataset/sparse/*.bin`; OpenSplat expects `sparse/0/`, Brush accepts either.

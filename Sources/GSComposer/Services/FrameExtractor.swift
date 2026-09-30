@@ -11,6 +11,14 @@ enum FrameExtractor {
         var targetCount: Int
         var pickSharpest: Bool
         var maxImageSize: Int
+        /// Keep the sensor orientation (ignore the track's rotation), so frames match ARKit poses and intrinsics.
+        var sensorOrientation = false
+    }
+
+    struct Extracted {
+        var name: String
+        /// Seconds from the start of the video.
+        var time: Double
     }
 
     enum ExtractionError: LocalizedError {
@@ -25,9 +33,9 @@ enum FrameExtractor {
         }
     }
 
-    /// - Returns: number of frames written.
+    /// - Returns: the frames written, in time order.
     static func extract(video: URL, into directory: URL, options: Options,
-                        progress: @escaping @Sendable (Double, String) -> Void) async throws -> Int {
+                        progress: @escaping @Sendable (Double, String) -> Void) async throws -> [Extracted] {
         let asset = AVURLAsset(url: video)
         let duration = try await asset.load(.duration).seconds
         guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw ExtractionError.noVideoTrack }
@@ -41,7 +49,7 @@ enum FrameExtractor {
             let candidates = FrameSelection.sampleTimes(duration: duration, count: min(target * 3, totalFrames))
             let slot = duration / Double(max(candidates.count, 1))
             let scorer = AVAssetImageGenerator(asset: asset)
-            scorer.appliesPreferredTrackTransform = true
+            scorer.appliesPreferredTrackTransform = !options.sensorOrientation
             scorer.maximumSize = CGSize(width: 480, height: 480)
             scorer.requestedTimeToleranceBefore = CMTime(seconds: slot / 2, preferredTimescale: 600)
             scorer.requestedTimeToleranceAfter = CMTime(seconds: slot / 2, preferredTimescale: 600)
@@ -61,22 +69,22 @@ enum FrameExtractor {
 
         // Pass 2: decode the chosen frames at working resolution.
         let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
+        generator.appliesPreferredTrackTransform = !options.sensorOrientation
         generator.maximumSize = CGSize(width: options.maxImageSize, height: options.maxImageSize)
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var written = 0
+        var written: [Extracted] = []
         let base = options.pickSharpest ? 0.5 : 0
         for (i, t) in times.enumerated() {
             try Task.checkCancellation()
             guard let frame = try? await generator.image(at: t) else { continue }
-            let url = directory.appendingPathComponent(String(format: "frame_%05d.jpg", written))
-            try ImageWriter.writeJPEG(frame.image, to: url, properties: nil)
-            written += 1
+            let name = String(format: "frame_%05d.jpg", written.count)
+            try ImageWriter.writeJPEG(frame.image, to: directory.appendingPathComponent(name), properties: nil)
+            written.append(Extracted(name: name, time: frame.actualTime.seconds))
             progress(base + Double(i + 1) / Double(times.count) * (1 - base), "フレーム書き出し \(i + 1)/\(times.count)")
         }
-        guard written > 0 else { throw ExtractionError.noFrames }
+        guard !written.isEmpty else { throw ExtractionError.noFrames }
         return written
     }
 

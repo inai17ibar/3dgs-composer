@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Foundation
 import GSComposerCore
 import Observation
@@ -30,6 +31,9 @@ final class AppModel {
     var inputKind: InputKind = .video
     var inputURLs: [URL] = []
     var projectName = ""
+    /// Camera poses recorded by 3DGS Material Collector next to the input (`manifest.json`).
+    var arkitCapture: ARKitCapture?
+    var useARKitPoses = true
 
     // Settings
     var preset: QualityPreset = .standard {
@@ -73,14 +77,45 @@ final class AppModel {
         return docs.appendingPathComponent("3DGS Composer", isDirectory: true)
     }
 
+    var arkitSummary: String? {
+        guard let capture = arkitCapture else { return nil }
+        switch inputKind {
+        case .video:
+            let samples = capture.videoFrames
+            guard let last = samples.last else { return nil }
+            return "manifest.json: \(Int(last.time.rounded())) 秒分のカメラ姿勢（\(samples.count) 件）"
+        case .photos:
+            let n = capture.frames.filter { $0.file != "video.mov" }.count
+            return n > 0 ? "manifest.json: 写真 \(n) 枚分のカメラ姿勢" : nil
+        }
+    }
+
+    /// About one frame per 5° of movement at the guided pace (≈ 1.7 frames per second).
+    var recommendedFrameCount: Int? {
+        guard inputKind == .video, let last = arkitCapture?.videoFrames.last else { return nil }
+        return min(max(Int((last.time * 1.7 / 10).rounded()) * 10, 100), 600)
+    }
+
     // MARK: Input
 
-    /// Accepts dropped/picked files: one movie → video mode; images/folders → photo mode.
+    /// Accepts dropped/picked files: one movie → video mode; images/folders → photo mode. A Material Collector
+    /// capture folder (with `manifest.json` and `video.mov`) is treated as its video.
     func setInputs(_ urls: [URL]) {
+        var urls = urls
+        if urls.count == 1, urls[0].hasDirectoryPath {
+            let video = urls[0].appendingPathComponent("video.mov")
+            if FileManager.default.fileExists(atPath: video.path),
+               FileManager.default.fileExists(atPath: urls[0].appendingPathComponent("manifest.json").path) {
+                urls = [video]
+            }
+        }
+        arkitCapture = ARKitCapture.manifestURL(near: urls[0]).flatMap { try? ARKitCapture.load($0) }
         if let movie = urls.first(where: PhotoImporter.isMovie) {
             inputKind = .video
             inputURLs = [movie]
             projectName = movie.deletingPathExtension().lastPathComponent
+            if movie.lastPathComponent == "video.mov" { projectName = movie.deletingLastPathComponent().lastPathComponent }
+            if let n = recommendedFrameCount { settings.targetFrameCount = n }
             return
         }
         let photos = PhotoImporter.expand(urls)
@@ -155,6 +190,7 @@ final class AppModel {
         let settings = self.settings
         let input = inputKind
         let sources = inputURLs
+        let arkit = useARKitPoses ? arkitCapture : nil
         let (events, continuation) = AsyncStream<PipelineEvent>.makeStream()
 
         let consumer = Task { @MainActor [weak self] in
@@ -163,6 +199,7 @@ final class AppModel {
 
         runTask = Task.detached { [weak self] in
             do {
+                var known: KnownPoses?
                 if start == .prepareImages {
                     continuation.yield(.stageStarted(.prepareImages))
                     try ws.create()
@@ -170,22 +207,33 @@ final class AppModel {
                     let progress: @Sendable (Double, String) -> Void = { f, d in
                         continuation.yield(.stageProgress(.prepareImages, fraction: f, detail: d))
                     }
+                    let log: @Sendable (String) -> Void = { continuation.yield(.log($0, .stdout)) }
                     let count: Int
                     switch input {
                     case .video:
-                        count = try await FrameExtractor.extract(
+                        let frames = try await FrameExtractor.extract(
                             video: sources[0], into: ws.images,
                             options: .init(targetCount: settings.targetFrameCount, pickSharpest: settings.pickSharpestFrames,
-                                           maxImageSize: settings.maxImageSize),
+                                           maxImageSize: settings.maxImageSize, sensorOrientation: arkit != nil),
                             progress: progress)
+                        count = frames.count
+                        if let arkit {
+                            let posed = frames.compactMap { f in arkit.videoPose(at: f.time).map { (f.name, $0) } }
+                            known = ARKitPoseMatcher.knownPoses(posed, total: frames.count, images: ws.images, log: log)
+                        }
                     case .photos:
-                        count = try await PhotoImporter.importPhotos(sources, into: ws.images, maxImageSize: settings.maxImageSize,
-                                                                     progress: progress)
+                        let names = try await PhotoImporter.importPhotos(sources, into: ws.images, maxImageSize: settings.maxImageSize,
+                                                                         progress: progress)
+                        count = names.count
+                        if let arkit {
+                            let posed = names.compactMap { src, dest in arkit.photo(named: src).map { (dest, ($0.pose, $0.camera)) } }
+                            known = ARKitPoseMatcher.knownPoses(posed, total: names.count, images: ws.images, log: log)
+                        }
                     }
                     continuation.yield(.stageFinished(.prepareImages, summary: "\(count) 枚"))
                 }
                 let pipeline = ReconstructionPipeline(workspace: ws, settings: settings, tools: tools, input: input,
-                                                      runner: ProcessRunner(path: childPath))
+                                                      runner: ProcessRunner(path: childPath), knownPoses: known)
                 let result = try await pipeline.run(from: max(start, .features)) { continuation.yield($0) }
                 continuation.finish()
                 await consumer.value
@@ -322,4 +370,47 @@ final class AppModel {
         f.locale = Locale(identifier: "en_US_POSIX")
         return f
     }()
+}
+
+/// Pairs the images written to the workspace with the poses recorded on the phone.
+enum ARKitPoseMatcher {
+    /// - Parameter posed: image file name → ARKit pose and intrinsics, for the images that have one.
+    /// - Returns: nil (fall back to SfM) when too few images have poses or the image shape does not match the
+    ///   intrinsics. Otherwise images without a pose are removed so every trained view has a known camera.
+    static func knownPoses(_ posed: [(String, (pose: RigidPose, camera: PinholeCamera))], total: Int, images: URL,
+                           log: (String) -> Void) -> KnownPoses? {
+        guard let first = posed.first,
+              let size = imageSize(images.appendingPathComponent(first.0)) else {
+            log("カメラ姿勢の記録と一致する画像がないため、COLMAP で姿勢を推定します")
+            return nil
+        }
+        guard posed.count >= max(3, total * 3 / 10) else {
+            log("カメラ姿勢があるのは \(total) 枚中 \(posed.count) 枚だけのため、COLMAP で姿勢を推定します")
+            return nil
+        }
+        let k = first.1.camera
+        let imageAspect = Double(size.width) / Double(size.height), sensorAspect = Double(k.width) / Double(k.height)
+        guard abs(imageAspect - sensorAspect) < 0.02 else {
+            log("画像の縦横比 (\(size.width)×\(size.height)) が記録 (\(k.width)×\(k.height)) と合わないため、COLMAP で姿勢を推定します")
+            return nil
+        }
+        guard let camera = KnownPoses.sharedCamera(posed.map(\.1.camera), imageWidth: size.width, imageHeight: size.height) else { return nil }
+        let keep = Set(posed.map(\.0))
+        let files = (try? FileManager.default.contentsOfDirectory(at: images, includingPropertiesForKeys: nil)) ?? []
+        for file in files where !keep.contains(file.lastPathComponent) {
+            try? FileManager.default.removeItem(at: file)
+        }
+        if posed.count < total {
+            log("カメラ姿勢の記録がない \(total - posed.count) 枚（トラッキングが不安定だった部分）を除外しました")
+        }
+        return KnownPoses(camera: camera, poses: Dictionary(posed.map { ($0.0, $0.1.pose) }, uniquingKeysWith: { a, _ in a }))
+    }
+
+    static func imageSize(_ url: URL) -> (width: Int, height: Int)? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int
+        else { return nil }
+        return (w, h)
+    }
 }

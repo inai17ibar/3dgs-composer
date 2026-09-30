@@ -5,7 +5,7 @@ let usage = """
 使い方:
   gscomposer-cli run --images <dir|file...> --workspace <dir> [--preset preview|standard|high]
                      [--trainer brush|opensplat] [--trainer-path <exe>] [--colmap <exe>]
-                     [--steps N] [--video] [--from <stage>]
+                     [--steps N] [--video] [--from <stage>] [--poses <known_poses.json>]
   gscomposer-cli convert <input.ply> <output.splat|output.ply>
   gscomposer-cli info <input.ply>
 """
@@ -73,11 +73,15 @@ func runPipeline(_ args: ArraySlice<String>) async {
             let n = try ImageImport.copyImages(from: images.map { URL(fileURLWithPath: $0) }, into: workspace)
             print("画像 \(n) 枚を取り込みました")
         }
+        var known: KnownPoses?
+        if let p = options["--poses"] {
+            known = try JSONDecoder().decode(KnownPoses.self, from: Data(contentsOf: URL(fileURLWithPath: p)))
+        }
         let pipeline = ReconstructionPipeline(
             workspace: workspace, settings: settings,
             tools: PipelineTools(colmap: colmap, glomap: locator.locate(.glomap), trainer: trainer),
             input: flags.contains("--video") ? .video : .photos,
-            runner: ProcessRunner(path: locator.childPath))
+            runner: ProcessRunner(path: locator.childPath), knownPoses: known)
         let verbose = ProcessInfo.processInfo.environment["GSCOMPOSER_VERBOSE"] != nil
         let result = try await pipeline.run(from: start) { event in
             switch event {

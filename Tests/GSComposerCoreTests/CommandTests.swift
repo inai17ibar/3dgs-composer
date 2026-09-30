@@ -72,6 +72,26 @@ final class CommandTests: XCTestCase {
         XCTAssertTrue(neither.mapping().arguments.contains("--Mapper.multiple_models"))
     }
 
+    func testOrientationAlignment() throws {
+        var caps = capabilities(newNames: true)
+        let model = workspace.sparse.appendingPathComponent("0")
+        let unsupported = ColmapCommandBuilder(colmap: colmap, glomap: nil, capabilities: caps,
+                                               settings: PipelineSettings(), workspace: workspace, input: .video)
+        XCTAssertNil(unsupported.orientationAlignment(model: model))
+
+        caps.commands.insert("model_orientation_aligner")
+        let builder = ColmapCommandBuilder(colmap: colmap, glomap: nil, capabilities: caps,
+                                           settings: PipelineSettings(), workspace: workspace, input: .video)
+        let command = try XCTUnwrap(builder.orientationAlignment(model: model))
+        XCTAssertEqual(command.arguments, [
+            "model_orientation_aligner",
+            "--image_path", workspace.images.path,
+            "--input_path", model.path,
+            "--output_path", workspace.alignedModel.path,
+            "--method", "IMAGE-ORIENTATION",
+        ])
+    }
+
     func testTrainerCommands() {
         var settings = PipelineSettings()
         settings.apply(.preview)
@@ -129,8 +149,10 @@ final class WorkspaceTests: XCTestCase {
         try Data([1]).write(to: ws.images.appendingPathComponent("notes.txt"))
         XCTAssertEqual(ws.imageFiles().map(\.lastPathComponent), ["a.png", "b.JPG"])
 
+        try FileManager.default.createDirectory(at: ws.alignedModel, withIntermediateDirectories: true)
         try ws.reset(from: .mapping)
         XCTAssertNil(ColmapModelSummary.largestModel(in: ws.sparse))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ws.alignedModel.path))
         XCTAssertEqual(ws.imageFiles().count, 2)
     }
 

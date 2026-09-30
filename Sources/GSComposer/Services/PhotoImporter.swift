@@ -32,11 +32,11 @@ enum PhotoImporter {
         return type.conforms(to: .movie) || type.conforms(to: .video)
     }
 
-    /// - Returns: number of images written.
+    /// - Returns: source file name → written file name, for every image written.
     static func importPhotos(_ sources: [URL], into directory: URL, maxImageSize: Int,
-                             progress: @escaping @Sendable (Double, String) -> Void) async throws -> Int {
+                             progress: @escaping @Sendable (Double, String) -> Void) async throws -> [String: String] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var written = 0
+        var written: [String: String] = [:]
         for (i, src) in sources.enumerated() {
             try Task.checkCancellation()
             guard let source = CGImageSourceCreateWithURL(src as CFURL, nil) else { continue }
@@ -57,9 +57,9 @@ enum PhotoImporter {
                 props[kCGImagePropertyTIFFDictionary] = tiff
             }
             props[kCGImagePropertyOrientation] = 1
-            let url = directory.appendingPathComponent(String(format: "img_%05d.jpg", written))
-            try ImageWriter.writeJPEG(image, to: url, properties: props)
-            written += 1
+            let name = String(format: "img_%05d.jpg", written.count)
+            try ImageWriter.writeJPEG(image, to: directory.appendingPathComponent(name), properties: props)
+            written[src.lastPathComponent] = name
             progress(Double(i + 1) / Double(sources.count), "写真 \(i + 1)/\(sources.count)")
         }
         return written

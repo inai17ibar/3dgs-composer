@@ -7,6 +7,9 @@ import Foundation
 ///   images/            input frames / photos
 ///   colmap/database.db
 ///   colmap/sparse/N/   COLMAP models (the largest is used)
+///   colmap/aligned/    largest model rotated so gravity points along +Y
+///   colmap/known_poses.json, known/, pairs.txt, triangulated/
+///                      ARKit poses: fixed-pose text model and matched pairs (instead of SfM)
 ///   dataset/           undistorted images + sparse/0 (trainer input)
 ///   train/             periodic trainer exports
 ///   output/            final PLY / .splat
@@ -21,6 +24,11 @@ public struct Workspace: Sendable, Equatable {
     public var colmap: URL { root.appendingPathComponent("colmap", isDirectory: true) }
     public var database: URL { colmap.appendingPathComponent("database.db") }
     public var sparse: URL { colmap.appendingPathComponent("sparse", isDirectory: true) }
+    public var alignedModel: URL { colmap.appendingPathComponent("aligned", isDirectory: true) }
+    public var knownPosesFile: URL { colmap.appendingPathComponent("known_poses.json") }
+    public var knownModel: URL { colmap.appendingPathComponent("known", isDirectory: true) }
+    public var pairsList: URL { colmap.appendingPathComponent("pairs.txt") }
+    public var triangulatedModel: URL { colmap.appendingPathComponent("triangulated", isDirectory: true) }
     public var dataset: URL { root.appendingPathComponent("dataset", isDirectory: true) }
     public var datasetSparse: URL { dataset.appendingPathComponent("sparse", isDirectory: true) }
     public var datasetModel: URL { datasetSparse.appendingPathComponent("0", isDirectory: true) }
@@ -44,13 +52,20 @@ public struct Workspace: Sendable, Equatable {
         guard let start = order.firstIndex(of: stage) else { return }
         for s in order[start...] {
             switch s {
-            case .prepareImages: try remove(images)
+            case .prepareImages:
+                try remove(images)
+                try remove(knownPosesFile)
             case .features:
                 try remove(database)
                 for suffix in ["-shm", "-wal"] { try remove(URL(fileURLWithPath: database.path + suffix)) }
-            case .matching: break
-            case .mapping: try remove(sparse)
-            case .undistortion: try remove(dataset)
+            case .matching: try remove(pairsList)
+            case .mapping:
+                try remove(sparse)
+                try remove(knownModel)
+                try remove(triangulatedModel)
+            case .undistortion:
+                try remove(alignedModel)
+                try remove(dataset)
             case .training: try remove(train)
             case .finalize: break
             }

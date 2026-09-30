@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @State private var showGuide = false
 
     var body: some View {
         @Bindable var model = model
@@ -20,11 +21,21 @@ struct SidebarView: View {
             .padding(.vertical, 8)
         }
         .listStyle(.sidebar)
+        .sheet(isPresented: $showGuide) { ShootingGuideView() }
     }
 
     private var inputSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("入力").font(.headline)
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("入力").font(.headline)
+                Spacer()
+                Button { showGuide = true } label: {
+                    Label("撮影ガイド", systemImage: "questionmark.circle")
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
             HStack {
                 Button { model.pickInputs(kind: .video) } label: {
                     Label("動画を選択", systemImage: "film")
@@ -41,7 +52,18 @@ struct SidebarView: View {
                 Text(model.inputSummary).lineLimit(1).truncationMode(.middle)
             }
             .foregroundStyle(model.inputURLs.isEmpty ? .secondary : .primary)
-            Text("ファイルやフォルダをウィンドウにドロップしても追加できます。物体の周りをゆっくり一周するように撮影すると良い結果になります。")
+            if let summary = model.arkitSummary {
+                Toggle(isOn: $model.useARKitPoses) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("iPhone で記録したカメラ姿勢を使う（推奨）")
+                        Text(summary).font(.caption).foregroundStyle(.secondary)
+                        Text("COLMAP の姿勢推定（SfM）を省略し、ARKit の姿勢で 3D 点を作ります。SfM が失敗する撮影でも復元できます。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(model.isRunning)
+            }
+            Text("ファイルやフォルダをウィンドウにドロップしても追加できます。被写体の周りを同じ距離で、高さを変えて何周か撮ると良い結果になります（撮影ガイド参照）。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -59,6 +81,11 @@ struct SidebarView: View {
             }
             if model.inputKind == .video {
                 Stepper("抽出フレーム数: \(model.settings.targetFrameCount)", value: $model.settings.targetFrameCount, in: 20...1000, step: 10)
+                if let n = model.recommendedFrameCount, n != model.settings.targetFrameCount {
+                    Button("撮影の長さに合わせたおすすめ: \(n) 枚") { model.settings.targetFrameCount = n }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
                 Toggle("ブレの少ないフレームを優先", isOn: $model.settings.pickSharpestFrames)
             }
             DisclosureGroup("詳細設定") {
