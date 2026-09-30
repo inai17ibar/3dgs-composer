@@ -3,9 +3,15 @@ import SwiftUI
 
 /// Makes the app a regular foreground app even when launched as a bare executable (`swift run`).
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.activate()
+        DispatchQueue.main.async {
+            NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+        }
     }
 }
 

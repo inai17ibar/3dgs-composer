@@ -23,14 +23,16 @@
 ## ビルド
 
 ```sh
-# SwiftPM で直接ビルド・起動
-swift run GSComposer
+# SwiftPM でビルドし、.app にまとめて起動（build/3DGS Composer.app）
+./scripts/run-app.sh
 
 # または Xcode プロジェクトを生成
 brew install xcodegen
 xcodegen generate
 open GSComposer.xcodeproj
 ```
+
+`swift run GSComposer` でも起動できますが、.app になっていないためボタンやメニューが反応しないことがあります。その場合は `./scripts/run-app.sh` を使ってください。
 
 ## 使い方
 
