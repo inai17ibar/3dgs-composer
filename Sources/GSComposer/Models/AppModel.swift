@@ -114,7 +114,7 @@ final class AppModel {
         }
         let trainerTool: ExternalTool = settings.trainer == .brush ? .brush : .opensplat
         guard let trainer = locator.locate(trainerTool) else {
-            errorMessage = "\(settings.trainer.displayName) が見つかりません。\n\(trainerTool.installHint)\n設定でパスを指定してください。"
+            errorMessage = "\(settings.trainer.displayName) が見つかりません。\n\(trainerTool.installHint)か、設定でパスを指定してください。"
             return
         }
         let stamp = Self.stampFormatter.string(from: Date())

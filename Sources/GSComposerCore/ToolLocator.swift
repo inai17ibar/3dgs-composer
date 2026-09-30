@@ -17,8 +17,8 @@ public enum ExternalTool: String, CaseIterable, Codable, Sendable {
         switch self {
         case .colmap: return "brew install colmap"
         case .glomap: return "brew install glomap（任意）"
-        case .brush: return "アプリの「Brush をダウンロード」または https://github.com/ArthurBrussee/brush/releases"
-        case .opensplat: return "https://github.com/pierotofy/OpenSplat をビルド"
+        case .brush: return "https://github.com/ArthurBrussee/brush/releases から brush-app-aarch64-apple-darwin.tar.xz を入手し、中の brush_app を ~/.local/bin に置く"
+        case .opensplat: return "https://github.com/pierotofy/OpenSplat をビルドする"
         case .ffmpeg: return "brew install ffmpeg"
         }
     }
