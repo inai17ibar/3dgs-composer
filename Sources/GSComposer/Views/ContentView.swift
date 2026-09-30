@@ -22,7 +22,7 @@ struct ContentView: View {
             }
             .toolbar {
                 ToolbarItemGroup {
-                    Button { ClickDiagnostics.log("ACTION toggleLog"); showLog.toggle() } label: {
+                    Button { showLog.toggle() } label: {
                         Label("ログ", systemImage: "text.alignleft")
                     }
                     .help("ログの表示/非表示")
@@ -40,8 +40,25 @@ struct ContentView: View {
                 }
             }
         }
-        .modifier(DropTargetModifier(isDropTargeted: $isDropTargeted, enabled: !ClickDiagnostics.flag("GS_NO_DROP"), onDrop: loadDropped))
-        .modifier(ErrorAlertModifier(enabled: !ClickDiagnostics.flag("GS_NO_ALERT")))
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            loadDropped(providers)
+            return true
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
+                    .background(Color.accentColor.opacity(0.08))
+                    .overlay(Text("動画・写真・フォルダ・.ply をドロップ").font(.title2))
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .alert("エラー", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
     }
 
     private func loadDropped(_ providers: [NSItemProvider]) {
@@ -80,11 +97,7 @@ struct ViewerPane: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            if ClickDiagnostics.flag("GS_NO_VIEWER") {
-                Color.black
-            } else {
-                SplatViewer(url: model.viewerURL, flipUp: flipUp) { status = $0 }
-            }
+            SplatViewer(url: model.viewerURL, flipUp: flipUp) { status = $0 }
             if model.viewerURL == nil {
                 ContentUnavailableView {
                     Label("3DGS プレビュー", systemImage: "cube.transparent")
@@ -104,52 +117,6 @@ struct ViewerPane: View {
             .font(.caption)
             .padding(8)
             .background(.ultraThinMaterial)
-        }
-    }
-}
-
-struct DropTargetModifier: ViewModifier {
-    @Binding var isDropTargeted: Bool
-    let enabled: Bool
-    let onDrop: ([NSItemProvider]) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content
-                .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-                    onDrop(providers)
-                    return true
-                }
-                .overlay {
-                    if isDropTargeted {
-                        RoundedRectangle(cornerRadius: 12)
-                            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8]))
-                            .background(Color.accentColor.opacity(0.08))
-                            .overlay(Text("動画・写真・フォルダ・.ply をドロップ").font(.title2))
-                            .padding(8)
-                            .allowsHitTesting(false)
-                    }
-                }
-        } else {
-            content
-        }
-    }
-}
-
-struct ErrorAlertModifier: ViewModifier {
-    @Environment(AppModel.self) private var model
-    let enabled: Bool
-
-    func body(content: Content) -> some View {
-        if enabled {
-            content
-                .alert("エラー", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
-                    Button("OK", role: .cancel) {}
-                } message: {
-                    Text(model.errorMessage ?? "")
-                }
-        } else {
-            content
         }
     }
 }

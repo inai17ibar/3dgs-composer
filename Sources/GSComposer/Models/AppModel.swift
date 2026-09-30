@@ -33,7 +33,7 @@ final class AppModel {
 
     // Settings
     var preset: QualityPreset = .standard {
-        didSet { ClickDiagnostics.log("ACTION preset=\(preset)"); settings.apply(preset) }
+        didSet { settings.apply(preset) }
     }
     var settings = PipelineSettings()
 
@@ -95,15 +95,12 @@ final class AppModel {
     }
 
     func pickInputs(kind: InputKind) {
-        ClickDiagnostics.log("ACTION pickInputs(\(kind))")
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = kind == .photos
         panel.canChooseDirectories = kind == .photos
         panel.allowedContentTypes = kind == .video ? [.movie] : [.image, .folder]
         panel.message = kind == .video ? "3DGS を作成する動画を選択" : "写真（複数可）またはフォルダを選択"
-        let response = panel.runModal()
-        ClickDiagnostics.log("ACTION pickInputs result=\(response.rawValue)")
-        if response == .OK { setInputs(panel.urls) }
+        if panel.runModal() == .OK { setInputs(panel.urls) }
     }
 
     // MARK: Run
