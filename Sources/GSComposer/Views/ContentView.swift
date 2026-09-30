@@ -22,7 +22,7 @@ struct ContentView: View {
             }
             .toolbar {
                 ToolbarItemGroup {
-                    Button { showLog.toggle() } label: {
+                    Button { ClickDiagnostics.log("ACTION toggleLog"); showLog.toggle() } label: {
                         Label("ログ", systemImage: "text.alignleft")
                     }
                     .help("ログの表示/非表示")
